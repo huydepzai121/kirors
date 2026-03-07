@@ -15,13 +15,16 @@ import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-
 import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode } from '@/hooks/use-credentials'
 import { getCredentialBalance } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
+import { useLocale } from '@/lib/locale'
 import type { BalanceResponse } from '@/types/api'
+import { LanguageSelector } from '@/components/language-selector'
 
 interface DashboardProps {
   onLogout: () => void
 }
 
 export function Dashboard({ onLogout }: DashboardProps) {
+  const { t } = useLocale()
   const [selectedCredentialId, setSelectedCredentialId] = useState<number | null>(null)
   const [balanceDialogOpen, setBalanceDialogOpen] = useState(false)
   const [addDialogOpen, setAddDialogOpen] = useState(false)
@@ -115,7 +118,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
   const handleRefresh = () => {
     refetch()
-    toast.success('已刷新凭据列表')
+    toast.success(t('refreshSuccess'))
   }
 
   const handleLogout = () => {
@@ -142,7 +145,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   // 批量删除（仅删除已禁用项）
   const handleBatchDelete = async () => {
     if (selectedIds.size === 0) {
-      toast.error('请先选择要删除的凭据')
+      toast.error(t('selectCredentialFirstDelete'))
       return
     }
 
@@ -152,14 +155,14 @@ export function Dashboard({ onLogout }: DashboardProps) {
     })
 
     if (disabledIds.length === 0) {
-      toast.error('选中的凭据中没有已禁用项')
+      toast.error(t('noDisabledInSelection'))
       return
     }
 
     const skippedCount = selectedIds.size - disabledIds.length
-    const skippedText = skippedCount > 0 ? `（将跳过 ${skippedCount} 个未禁用凭据）` : ''
+    const skippedText = skippedCount > 0 ? t('skippedDisabledNote', { count: skippedCount }) : ''
 
-    if (!confirm(`确定要删除 ${disabledIds.length} 个已禁用凭据吗？此操作无法撤销。${skippedText}`)) {
+    if (!confirm(t('confirmDeleteDisabled', { count: disabledIds.length, skipped: skippedText }))) {
       return
     }
 
@@ -185,12 +188,16 @@ export function Dashboard({ onLogout }: DashboardProps) {
       }
     }
 
-    const skippedResultText = skippedCount > 0 ? `，已跳过 ${skippedCount} 个未禁用凭据` : ''
+    const localizedSkippedResultText = skippedCount > 0 ? t('skippedDisabledNote', { count: skippedCount }) : ''
 
     if (failCount === 0) {
-      toast.success(`成功删除 ${successCount} 个已禁用凭据${skippedResultText}`)
+      toast.success(t('deleteDisabledResult', { success: successCount, skipped: localizedSkippedResultText }))
     } else {
-      toast.warning(`删除已禁用凭据：成功 ${successCount} 个，失败 ${failCount} 个${skippedResultText}`)
+      toast.warning(t('deleteDisabledPartialResult', {
+        success: successCount,
+        failed: failCount,
+        skipped: localizedSkippedResultText,
+      }))
     }
 
     deselectAll()
@@ -199,7 +206,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   // 批量恢复异常
   const handleBatchResetFailure = async () => {
     if (selectedIds.size === 0) {
-      toast.error('请先选择要恢复的凭据')
+      toast.error(t('selectCredentialFirstReset'))
       return
     }
 
@@ -209,7 +216,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
     })
 
     if (failedIds.length === 0) {
-      toast.error('选中的凭据中没有失败的凭据')
+      toast.error(t('noFailedInSelection'))
       return
     }
 
@@ -236,9 +243,9 @@ export function Dashboard({ onLogout }: DashboardProps) {
     }
 
     if (failCount === 0) {
-      toast.success(`成功恢复 ${successCount} 个凭据`)
+      toast.success(t('resetResult', { success: successCount }))
     } else {
-      toast.warning(`成功 ${successCount} 个，失败 ${failCount} 个`)
+      toast.warning(t('resetPartialResult', { success: successCount, failed: failCount }))
     }
 
     deselectAll()
@@ -247,18 +254,18 @@ export function Dashboard({ onLogout }: DashboardProps) {
   // 一键清除所有已禁用凭据
   const handleClearAll = async () => {
     if (!data?.credentials || data.credentials.length === 0) {
-      toast.error('没有可清除的凭据')
+      toast.error(t('noCredentialToClear'))
       return
     }
 
     const disabledCredentials = data.credentials.filter(credential => credential.disabled)
 
     if (disabledCredentials.length === 0) {
-      toast.error('没有可清除的已禁用凭据')
+      toast.error(t('noDisabledToClearList'))
       return
     }
 
-    if (!confirm(`确定要清除所有 ${disabledCredentials.length} 个已禁用凭据吗？此操作无法撤销。`)) {
+    if (!confirm(t('confirmClearAllDisabled', { count: disabledCredentials.length }))) {
       return
     }
 
@@ -285,9 +292,9 @@ export function Dashboard({ onLogout }: DashboardProps) {
     }
 
     if (failCount === 0) {
-      toast.success(`成功清除所有 ${successCount} 个已禁用凭据`)
+      toast.success(t('clearAllResult', { success: successCount }))
     } else {
-      toast.warning(`清除已禁用凭据：成功 ${successCount} 个，失败 ${failCount} 个`)
+      toast.warning(t('clearAllPartialResult', { success: successCount, failed: failCount }))
     }
 
     deselectAll()
@@ -296,7 +303,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   // 查询当前页凭据信息（逐个查询，避免瞬时并发）
   const handleQueryCurrentPageInfo = async () => {
     if (currentCredentials.length === 0) {
-      toast.error('当前页没有可查询的凭据')
+      toast.error(t('noCredentialCurrentPage'))
       return
     }
 
@@ -305,7 +312,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
       .map(credential => credential.id)
 
     if (ids.length === 0) {
-      toast.error('当前页没有可查询的启用凭据')
+      toast.error(t('noEnabledCurrentPage'))
       return
     }
 
@@ -349,16 +356,16 @@ export function Dashboard({ onLogout }: DashboardProps) {
     setQueryingInfo(false)
 
     if (failCount === 0) {
-      toast.success(`查询完成：成功 ${successCount}/${ids.length}`)
+      toast.success(t('queryResult', { success: successCount, total: ids.length }))
     } else {
-      toast.warning(`查询完成：成功 ${successCount} 个，失败 ${failCount} 个`)
+      toast.warning(t('queryPartialResult', { success: successCount, failed: failCount }))
     }
   }
 
   // 批量验活
   const handleBatchVerify = async () => {
     if (selectedIds.size === 0) {
-      toast.error('请先选择要验活的凭据')
+      toast.error(t('selectCredentialFirstVerify'))
       return
     }
 
@@ -382,7 +389,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
     for (let i = 0; i < ids.length; i++) {
       // 检查是否取消
       if (cancelVerifyRef.current) {
-        toast.info('已取消验活')
+        toast.info(t('verifyCancelled'))
         break
       }
 
@@ -434,7 +441,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
     setVerifying(false)
 
     if (!cancelVerifyRef.current) {
-      toast.success(`验活完成：成功 ${successCount}/${ids.length}`)
+      toast.success(t('verifyDone', { success: successCount, total: ids.length }))
     }
   }
 
@@ -451,11 +458,11 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
     setLoadBalancingMode(newMode, {
       onSuccess: () => {
-        const modeName = newMode === 'priority' ? '优先级模式' : '均衡负载模式'
-        toast.success(`已切换到${modeName}`)
+        const modeName = newMode === 'priority' ? t('loadBalancingPriority') : t('loadBalancingBalanced')
+        toast.success(t('modeSwitched', { mode: modeName }))
       },
       onError: (error) => {
-        toast.error(`切换失败: ${extractErrorMessage(error)}`)
+        toast.error(t('modeSwitchFailed', { message: extractErrorMessage(error) }))
       }
     })
   }
@@ -465,7 +472,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
       <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
-          <p className="text-muted-foreground">加载中...</p>
+          <p className="text-muted-foreground">{t('loading')}</p>
         </div>
       </div>
     )
@@ -476,11 +483,11 @@ export function Dashboard({ onLogout }: DashboardProps) {
       <div className="min-h-screen flex items-center justify-center bg-background p-4">
         <Card className="w-full max-w-md">
           <CardContent className="pt-6 text-center">
-            <div className="text-red-500 mb-4">加载失败</div>
+            <div className="text-red-500 mb-4">{t('loadFailed')}</div>
             <p className="text-muted-foreground mb-4">{(error as Error).message}</p>
             <div className="space-x-2">
-              <Button onClick={() => refetch()}>重试</Button>
-              <Button variant="outline" onClick={handleLogout}>重新登录</Button>
+              <Button onClick={() => refetch()}>{t('retry')}</Button>
+              <Button variant="outline" onClick={handleLogout}>{t('relogin')}</Button>
             </div>
           </CardContent>
         </Card>
@@ -495,17 +502,18 @@ export function Dashboard({ onLogout }: DashboardProps) {
         <div className="container flex h-14 items-center justify-between px-4 md:px-8">
           <div className="flex items-center gap-2">
             <Server className="h-5 w-5" />
-            <span className="font-semibold">Kiro Admin</span>
+            <span className="font-semibold">{t('appTitle')}</span>
           </div>
           <div className="flex items-center gap-2">
+            <LanguageSelector compact />
             <Button
               variant="outline"
               size="sm"
               onClick={handleToggleLoadBalancing}
               disabled={isLoadingMode || isSettingMode}
-              title="切换负载均衡模式"
+              title={t('toggleLoadBalancing')}
             >
-              {isLoadingMode ? '加载中...' : (loadBalancingData?.mode === 'priority' ? '优先级模式' : '均衡负载')}
+              {isLoadingMode ? t('loading') : (loadBalancingData?.mode === 'priority' ? t('loadBalancingPriority') : t('loadBalancingBalanced'))}
             </Button>
             <Button variant="ghost" size="icon" onClick={toggleDarkMode}>
               {darkMode ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
@@ -527,7 +535,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
-                凭据总数
+                {t('statTotalCredentials')}
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -537,7 +545,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
-                可用凭据
+                {t('statAvailableCredentials')}
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -547,13 +555,13 @@ export function Dashboard({ onLogout }: DashboardProps) {
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
-                当前活跃
+                {t('statCurrentActive')}
               </CardTitle>
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold flex items-center gap-2">
                 #{data?.currentId || '-'}
-                <Badge variant="success">活跃</Badge>
+                <Badge variant="success">{t('active')}</Badge>
               </div>
             </CardContent>
           </Card>
@@ -563,12 +571,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
-              <h2 className="text-xl font-semibold">凭据管理</h2>
+              <h2 className="text-xl font-semibold">{t('credentialManagement')}</h2>
               {selectedIds.size > 0 && (
                 <div className="flex items-center gap-2">
-                  <Badge variant="secondary">已选择 {selectedIds.size} 个</Badge>
+                  <Badge variant="secondary">{t('selectedCount', { count: selectedIds.size })}</Badge>
                   <Button onClick={deselectAll} size="sm" variant="ghost">
-                    取消选择
+                    {t('deselect')}
                   </Button>
                 </div>
               )}
@@ -578,28 +586,28 @@ export function Dashboard({ onLogout }: DashboardProps) {
                 <>
                   <Button onClick={handleBatchVerify} size="sm" variant="outline">
                     <CheckCircle2 className="h-4 w-4 mr-2" />
-                    批量验活
+                    {t('batchVerify')}
                   </Button>
                   <Button onClick={handleBatchResetFailure} size="sm" variant="outline">
                     <RotateCcw className="h-4 w-4 mr-2" />
-                    恢复异常
+                    {t('resetFailure')}
                   </Button>
                   <Button
                     onClick={handleBatchDelete}
                     size="sm"
                     variant="destructive"
                     disabled={selectedDisabledCount === 0}
-                    title={selectedDisabledCount === 0 ? '只能删除已禁用凭据' : undefined}
+                    title={selectedDisabledCount === 0 ? t('deleteDisabledHint') : undefined}
                   >
                     <Trash2 className="h-4 w-4 mr-2" />
-                    批量删除
+                    {t('batchDelete')}
                   </Button>
                 </>
               )}
               {verifying && !verifyDialogOpen && (
                 <Button onClick={() => setVerifyDialogOpen(true)} size="sm" variant="secondary">
                   <CheckCircle2 className="h-4 w-4 mr-2 animate-spin" />
-                  验活中... {verifyProgress.current}/{verifyProgress.total}
+                  {t('verifyingProgress', { current: verifyProgress.current, total: verifyProgress.total })}
                 </Button>
               )}
               {data?.credentials && data.credentials.length > 0 && (
@@ -610,7 +618,9 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   disabled={queryingInfo}
                 >
                   <RefreshCw className={`h-4 w-4 mr-2 ${queryingInfo ? 'animate-spin' : ''}`} />
-                  {queryingInfo ? `查询中... ${queryInfoProgress.current}/${queryInfoProgress.total}` : '查询信息'}
+                  {queryingInfo
+                    ? t('queryingInfo', { current: queryInfoProgress.current, total: queryInfoProgress.total })
+                    : t('queryInfo')}
                 </Button>
               )}
               {data?.credentials && data.credentials.length > 0 && (
@@ -620,30 +630,30 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   variant="outline"
                   className="text-destructive hover:text-destructive"
                   disabled={disabledCredentialCount === 0}
-                  title={disabledCredentialCount === 0 ? '没有可清除的已禁用凭据' : undefined}
+                  title={disabledCredentialCount === 0 ? t('noDisabledToClear') : undefined}
                 >
                   <Trash2 className="h-4 w-4 mr-2" />
-                  清除已禁用
+                  {t('clearDisabled')}
                 </Button>
               )}
               <Button onClick={() => setKamImportDialogOpen(true)} size="sm" variant="outline">
                 <FileUp className="h-4 w-4 mr-2" />
-                Kiro Account Manager 导入
+                {t('kamImport')}
               </Button>
               <Button onClick={() => setBatchImportDialogOpen(true)} size="sm" variant="outline">
                 <Upload className="h-4 w-4 mr-2" />
-                批量导入
+                {t('batchImport')}
               </Button>
               <Button onClick={() => setAddDialogOpen(true)} size="sm">
                 <Plus className="h-4 w-4 mr-2" />
-                添加凭据
+                {t('addCredential')}
               </Button>
             </div>
           </div>
           {data?.credentials.length === 0 ? (
             <Card>
               <CardContent className="py-8 text-center text-muted-foreground">
-                暂无凭据
+                {t('noCredentials')}
               </CardContent>
             </Card>
           ) : (
@@ -671,10 +681,14 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
                     disabled={currentPage === 1}
                   >
-                    上一页
+                    {t('prevPage')}
                   </Button>
                   <span className="text-sm text-muted-foreground">
-                    第 {currentPage} / {totalPages} 页（共 {data?.credentials.length} 个凭据）
+                    {t('pageInfo', {
+                      current: currentPage,
+                      total: totalPages,
+                      count: data?.credentials.length || 0,
+                    })}
                   </span>
                   <Button
                     variant="outline"
@@ -682,7 +696,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
                     disabled={currentPage === totalPages}
                   >
-                    下一页
+                    {t('nextPage')}
                   </Button>
                 </div>
               )}

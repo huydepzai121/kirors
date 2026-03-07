@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react'
 import { KeyRound } from 'lucide-react'
 import { storage } from '@/lib/storage'
+import { useLocale } from '@/lib/locale'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
+import { LanguageSelector } from '@/components/language-selector'
 
 interface LoginPageProps {
   onLogin: (apiKey: string) => void
@@ -11,6 +13,7 @@ interface LoginPageProps {
 
 export function LoginPage({ onLogin }: LoginPageProps) {
   const [apiKey, setApiKey] = useState('')
+  const { t } = useLocale()
 
   useEffect(() => {
     // 从 storage 读取保存的 API Key
@@ -30,29 +33,32 @@ export function LoginPage({ onLogin }: LoginPageProps) {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-background p-4">
-      <Card className="w-full max-w-md">
-        <CardHeader className="text-center">
-          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
-            <KeyRound className="h-6 w-6 text-primary" />
-          </div>
-          <CardTitle className="text-2xl">Kiro Admin</CardTitle>
+        <Card className="w-full max-w-md">
+          <CardHeader className="text-center">
+            <div className="flex justify-end">
+              <LanguageSelector compact />
+            </div>
+            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
+              <KeyRound className="h-6 w-6 text-primary" />
+            </div>
+          <CardTitle className="text-2xl">{t('appTitle')}</CardTitle>
           <CardDescription>
-            请输入 Admin API Key 以访问管理面板
+            {t('loginDescription')}
           </CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
-              <Input
-                type="password"
-                placeholder="Admin API Key"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                className="text-center"
-              />
-            </div>
+                <Input
+                  type="password"
+                  placeholder={t('loginApiKeyPlaceholder')}
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  className="text-center"
+                />
+              </div>
             <Button type="submit" className="w-full" disabled={!apiKey.trim()}>
-              登录
+              {t('signIn')}
             </Button>
           </form>
         </CardContent>

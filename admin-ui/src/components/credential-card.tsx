@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
+import { useLocale } from '@/lib/locale'
 import {
   Dialog,
   DialogContent,
@@ -32,20 +33,20 @@ interface CredentialCardProps {
   loadingBalance: boolean
 }
 
-function formatLastUsed(lastUsedAt: string | null): string {
-  if (!lastUsedAt) return '从未使用'
+function formatLastUsed(lastUsedAt: string | null, t: (key: any, params?: Record<string, string | number>) => string): string {
+  if (!lastUsedAt) return t('neverUsed')
   const date = new Date(lastUsedAt)
   const now = new Date()
   const diff = now.getTime() - date.getTime()
-  if (diff < 0) return '刚刚'
+  if (diff < 0) return t('justNow')
   const seconds = Math.floor(diff / 1000)
-  if (seconds < 60) return `${seconds} 秒前`
+  if (seconds < 60) return t('secondsAgo', { count: seconds })
   const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes} 分钟前`
+  if (minutes < 60) return t('minutesAgo', { count: minutes })
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours} 小时前`
+  if (hours < 24) return t('hoursAgo', { count: hours })
   const days = Math.floor(hours / 24)
-  return `${days} 天前`
+  return t('daysAgo', { count: days })
 }
 
 export function CredentialCard({
@@ -56,6 +57,7 @@ export function CredentialCard({
   balance,
   loadingBalance,
 }: CredentialCardProps) {
+  const { t, formatNumber } = useLocale()
   const [editingPriority, setEditingPriority] = useState(false)
   const [priorityValue, setPriorityValue] = useState(String(credential.priority))
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
@@ -73,7 +75,7 @@ export function CredentialCard({
           toast.success(res.message)
         },
         onError: (err) => {
-          toast.error('操作失败: ' + (err as Error).message)
+          toast.error(t('actionFailed', { message: (err as Error).message }))
         },
       }
     )
@@ -82,7 +84,7 @@ export function CredentialCard({
   const handlePriorityChange = () => {
     const newPriority = parseInt(priorityValue, 10)
     if (isNaN(newPriority) || newPriority < 0) {
-      toast.error('优先级必须是非负整数')
+      toast.error(t('priorityMustBeNonNegative'))
       return
     }
     setPriority.mutate(
@@ -93,7 +95,7 @@ export function CredentialCard({
           setEditingPriority(false)
         },
         onError: (err) => {
-          toast.error('操作失败: ' + (err as Error).message)
+          toast.error(t('actionFailed', { message: (err as Error).message }))
         },
       }
     )
@@ -105,14 +107,14 @@ export function CredentialCard({
         toast.success(res.message)
       },
       onError: (err) => {
-        toast.error('操作失败: ' + (err as Error).message)
+        toast.error(t('actionFailed', { message: (err as Error).message }))
       },
     })
   }
 
   const handleDelete = () => {
     if (!credential.disabled) {
-      toast.error('请先禁用凭据再删除')
+      toast.error(t('disableBeforeDelete'))
       setShowDeleteDialog(false)
       return
     }
@@ -123,7 +125,7 @@ export function CredentialCard({
         setShowDeleteDialog(false)
       },
       onError: (err) => {
-        toast.error('删除失败: ' + (err as Error).message)
+        toast.error(t('deleteFailed', { message: (err as Error).message }))
       },
     })
   }
@@ -139,17 +141,17 @@ export function CredentialCard({
                 onCheckedChange={onToggleSelect}
               />
               <CardTitle className="text-lg flex items-center gap-2">
-                {credential.email || `凭据 #${credential.id}`}
+                {credential.email || t('credentialId', { id: credential.id })}
                 {credential.isCurrent && (
-                  <Badge variant="success">当前</Badge>
+                  <Badge variant="success">{t('active')}</Badge>
                 )}
                 {credential.disabled && (
-                  <Badge variant="destructive">已禁用</Badge>
+                  <Badge variant="destructive">{t('disabled')}</Badge>
                 )}
               </CardTitle>
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-sm text-muted-foreground">启用</span>
+              <span className="text-sm text-muted-foreground">{t('enabled')}</span>
               <Switch
                 checked={!credential.disabled}
                 onCheckedChange={handleToggleDisabled}
@@ -162,7 +164,7 @@ export function CredentialCard({
           {/* 信息网格 */}
           <div className="grid grid-cols-2 gap-4 text-sm">
             <div>
-              <span className="text-muted-foreground">优先级：</span>
+              <span className="text-muted-foreground">{t('priority')}: </span>
               {editingPriority ? (
                 <div className="inline-flex items-center gap-1 ml-1">
                   <Input
@@ -199,58 +201,60 @@ export function CredentialCard({
                   onClick={() => setEditingPriority(true)}
                 >
                   {credential.priority}
-                  <span className="text-xs text-muted-foreground ml-1">(点击编辑)</span>
+                  <span className="text-xs text-muted-foreground ml-1">{t('clickToEdit')}</span>
                 </span>
               )}
             </div>
             <div>
-              <span className="text-muted-foreground">失败次数：</span>
+              <span className="text-muted-foreground">{t('failureCount')}: </span>
               <span className={credential.failureCount > 0 ? 'text-red-500 font-medium' : ''}>
                 {credential.failureCount}
               </span>
             </div>
             <div>
-              <span className="text-muted-foreground">订阅等级：</span>
+              <span className="text-muted-foreground">{t('subscriptionTier')}: </span>
               <span className="font-medium">
                 {loadingBalance ? (
                   <Loader2 className="inline w-3 h-3 animate-spin" />
-                ) : balance?.subscriptionTitle || '未知'}
+                ) : balance?.subscriptionTitle || t('unknown')}
               </span>
             </div>
             <div>
-              <span className="text-muted-foreground">成功次数：</span>
+              <span className="text-muted-foreground">{t('successCountLabel')}: </span>
               <span className="font-medium">{credential.successCount}</span>
             </div>
             <div className="col-span-2">
-              <span className="text-muted-foreground">最后调用：</span>
-              <span className="font-medium">{formatLastUsed(credential.lastUsedAt)}</span>
+              <span className="text-muted-foreground">{t('lastUsed')}: </span>
+              <span className="font-medium">{formatLastUsed(credential.lastUsedAt, t)}</span>
             </div>
             <div className="col-span-2">
-              <span className="text-muted-foreground">剩余用量：</span>
+              <span className="text-muted-foreground">{t('remainingUsage')}: </span>
               {loadingBalance ? (
                 <span className="text-sm ml-1">
-                  <Loader2 className="inline w-3 h-3 animate-spin" /> 加载中...
+                  <Loader2 className="inline w-3 h-3 animate-spin" /> {t('loading')}
                 </span>
               ) : balance ? (
                 <span className="font-medium ml-1">
-                  {balance.remaining.toFixed(2)} / {balance.usageLimit.toFixed(2)}
+                  {formatNumber(balance.remaining, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  {' / '}
+                  {formatNumber(balance.usageLimit, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   <span className="text-xs text-muted-foreground ml-1">
-                    ({(100 - balance.usagePercentage).toFixed(1)}% 剩余)
+                    {t('remainingPercent', { percent: (100 - balance.usagePercentage).toFixed(1) })}
                   </span>
                 </span>
               ) : (
-                <span className="text-sm text-muted-foreground ml-1">未知</span>
+                <span className="text-sm text-muted-foreground ml-1">{t('unknown')}</span>
               )}
             </div>
             {credential.hasProxy && (
               <div className="col-span-2">
-                <span className="text-muted-foreground">代理：</span>
+                <span className="text-muted-foreground">{t('proxy')}: </span>
                 <span className="font-medium">{credential.proxyUrl}</span>
               </div>
             )}
             {credential.hasProfileArn && (
               <div className="col-span-2">
-                <Badge variant="secondary">有 Profile ARN</Badge>
+                <Badge variant="secondary">{t('hasProfileArn')}</Badge>
               </div>
             )}
           </div>
@@ -264,7 +268,7 @@ export function CredentialCard({
               disabled={resetFailure.isPending || credential.failureCount === 0}
             >
               <RefreshCw className="h-4 w-4 mr-1" />
-              重置失败
+              {t('resetFailure')}
             </Button>
             <Button
               size="sm"
@@ -275,14 +279,14 @@ export function CredentialCard({
                   { id: credential.id, priority: newPriority },
                   {
                     onSuccess: (res) => toast.success(res.message),
-                    onError: (err) => toast.error('操作失败: ' + (err as Error).message),
+                    onError: (err) => toast.error(t('actionFailed', { message: (err as Error).message })),
                   }
                 )
               }}
               disabled={setPriority.isPending || credential.priority === 0}
             >
               <ChevronUp className="h-4 w-4 mr-1" />
-              提高优先级
+              {t('increasePriority')}
             </Button>
             <Button
               size="sm"
@@ -293,14 +297,14 @@ export function CredentialCard({
                   { id: credential.id, priority: newPriority },
                   {
                     onSuccess: (res) => toast.success(res.message),
-                    onError: (err) => toast.error('操作失败: ' + (err as Error).message),
+                    onError: (err) => toast.error(t('actionFailed', { message: (err as Error).message })),
                   }
                 )
               }}
               disabled={setPriority.isPending}
             >
               <ChevronDown className="h-4 w-4 mr-1" />
-              降低优先级
+              {t('decreasePriority')}
             </Button>
             <Button
               size="sm"
@@ -308,17 +312,17 @@ export function CredentialCard({
               onClick={() => onViewBalance(credential.id)}
             >
               <Wallet className="h-4 w-4 mr-1" />
-              查看余额
+              {t('viewBalance')}
             </Button>
             <Button
               size="sm"
               variant="destructive"
               onClick={() => setShowDeleteDialog(true)}
               disabled={!credential.disabled}
-              title={!credential.disabled ? '需要先禁用凭据才能删除' : undefined}
+              title={!credential.disabled ? t('deleteNeedDisabledHint') : undefined}
             >
               <Trash2 className="h-4 w-4 mr-1" />
-              删除
+              {t('delete')}
             </Button>
           </div>
         </CardContent>
@@ -328,9 +332,9 @@ export function CredentialCard({
       <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>确认删除凭据</DialogTitle>
+            <DialogTitle>{t('deleteCredentialTitle')}</DialogTitle>
             <DialogDescription>
-              您确定要删除凭据 #{credential.id} 吗？此操作无法撤销。
+              {t('deleteCredentialConfirm', { id: credential.id })}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -339,14 +343,14 @@ export function CredentialCard({
               onClick={() => setShowDeleteDialog(false)}
               disabled={deleteCredential.isPending}
             >
-              取消
+              {t('cancel')}
             </Button>
             <Button
               variant="destructive"
               onClick={handleDelete}
               disabled={deleteCredential.isPending || !credential.disabled}
             >
-              确认删除
+              {t('confirmDelete')}
             </Button>
           </DialogFooter>
         </DialogContent>

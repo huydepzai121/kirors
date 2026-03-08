@@ -18,6 +18,7 @@ use super::types::{ContentBlock, MessagesRequest};
 ///
 /// Claude Code / MCP 工具定义偶尔会出现 `required: null`、`properties: null` 等，
 /// 导致上游返回 400 "Improperly formed request"。
+/// 递归处理嵌套的 properties 以确保所有层级都被规范化。
 fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
     let serde_json::Value::Object(mut obj) = schema else {
         return serde_json::json!({
@@ -33,10 +34,18 @@ fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
         obj.insert("type".to_string(), serde_json::Value::String("object".to_string()));
     }
 
-    // properties（必须是 object）
-    match obj.get("properties") {
-        Some(serde_json::Value::Object(_)) => {}
-        _ => { obj.insert("properties".to_string(), serde_json::Value::Object(serde_json::Map::new())); }
+    // properties（必须是 object，递归规范化每个 property 的 schema）
+    match obj.remove("properties") {
+        Some(serde_json::Value::Object(props)) => {
+            let normalized_props: serde_json::Map<String, serde_json::Value> = props
+                .into_iter()
+                .map(|(k, v)| (k, normalize_nested_schema(v)))
+                .collect();
+            obj.insert("properties".to_string(), serde_json::Value::Object(normalized_props));
+        }
+        _ => {
+            obj.insert("properties".to_string(), serde_json::Value::Object(serde_json::Map::new()));
+        }
     }
 
     // required（必须是 string 数组）
@@ -54,6 +63,49 @@ fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
     match obj.get("additionalProperties") {
         Some(serde_json::Value::Bool(_)) | Some(serde_json::Value::Object(_)) => {}
         _ => { obj.insert("additionalProperties".to_string(), serde_json::Value::Bool(true)); }
+    }
+
+    serde_json::Value::Object(obj)
+}
+
+/// 递归规范化嵌套的 JSON Schema property
+///
+/// 处理 properties 内部的 schema 定义，修复 required: null 等问题
+fn normalize_nested_schema(schema: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(mut obj) = schema else {
+        return schema;
+    };
+
+    // 修复 required: null → required: []
+    match obj.get("required") {
+        Some(serde_json::Value::Array(_)) => {}
+        Some(serde_json::Value::Null) => {
+            obj.insert("required".to_string(), serde_json::Value::Array(Vec::new()));
+        }
+        _ => {}
+    }
+
+    // 修复 properties: null → properties: {}
+    match obj.get("properties") {
+        Some(serde_json::Value::Object(_)) => {}
+        Some(serde_json::Value::Null) => {
+            obj.insert("properties".to_string(), serde_json::Value::Object(serde_json::Map::new()));
+        }
+        _ => {}
+    }
+
+    // 递归处理嵌套 properties
+    if let Some(serde_json::Value::Object(props)) = obj.remove("properties") {
+        let normalized: serde_json::Map<String, serde_json::Value> = props
+            .into_iter()
+            .map(|(k, v)| (k, normalize_nested_schema(v)))
+            .collect();
+        obj.insert("properties".to_string(), serde_json::Value::Object(normalized));
+    }
+
+    // 递归处理 items（数组类型的 schema）
+    if let Some(items) = obj.remove("items") {
+        obj.insert("items".to_string(), normalize_nested_schema(items));
     }
 
     serde_json::Value::Object(obj)
@@ -242,8 +294,16 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
     // 9. 从历史中移除孤立的 tool_use（Kiro API 要求 tool_use 必须有对应的 tool_result）
     remove_orphaned_tool_uses(&mut history, &orphaned_tool_use_ids);
 
-    // 9.5. 从历史 user 消息中移除孤立的 tool_result（trim 后可能出现）
-    remove_orphaned_history_tool_results(&mut history);
+    // 9.5-9.6. 迭代清理：移除孤立 tool_result → 移除空消息对 → 可能产生新孤立 → 重复
+    // 最多迭代 5 次防止无限循环
+    for _ in 0..5 {
+        let before_len = history.len();
+        remove_orphaned_history_tool_results(&mut history);
+        remove_empty_history_message_pairs(&mut history);
+        if history.len() == before_len {
+            break; // 没有变化，稳定了
+        }
+    }
 
     // 10. 收集历史中使用的工具名称，为缺失的工具生成占位符定义
     // Kiro API 要求：历史消息中引用的工具必须在 tools 列表中有定义
@@ -260,18 +320,24 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
         }
     }
 
+    // 12. 构建当前消息
+    // Kiro API 要求 content 不能为空，当只有 tool_results 时用占位符
+    let has_tool_results = !validated_tool_results.is_empty();
+
     // 11. 构建 UserInputMessageContext
     let mut context = UserInputMessageContext::new();
     if !tools.is_empty() {
         context = context.with_tools(tools);
     }
-    if !validated_tool_results.is_empty() {
+    if has_tool_results {
         context = context.with_tool_results(validated_tool_results);
     }
 
-    // 12. 构建当前消息
-    // 保留文本内容，即使有工具结果也不丢弃用户文本
-    let content = text_content;
+    let content = if text_content.is_empty() && has_tool_results {
+        " ".to_string()
+    } else {
+        text_content
+    };
 
     let mut user_input = UserInputMessage::new(content, &model_id)
         .with_context(context)
@@ -556,6 +622,40 @@ fn remove_orphaned_history_tool_results(history: &mut [Message]) {
     }
 }
 
+/// 移除 orphan cleanup 后变空的历史消息对
+///
+/// 当 remove_orphaned_history_tool_results 移除了 user 消息中所有 tool_result 后，
+/// 该 user 消息可能变为空（无文本、无 tool_result、无图片）。
+/// Kiro API 不接受空的 user 消息，需要连同配对的 assistant 消息一起移除。
+fn remove_empty_history_message_pairs(history: &mut Vec<Message>) {
+    let mut i = 0;
+    while i < history.len() {
+        let is_empty_user = if let Message::User(user_msg) = &history[i] {
+            let um = &user_msg.user_input_message;
+            um.content.trim().is_empty()
+                && um.user_input_message_context.tool_results.is_empty()
+                && um.images.is_empty()
+        } else {
+            false
+        };
+
+        if is_empty_user {
+            tracing::warn!("移除空的历史 user 消息（index={}）及配对的 assistant 消息", i);
+            // 移除 user 消息
+            history.remove(i);
+            // 移除紧跟的 assistant 消息（如果存在）
+            if i < history.len() {
+                if let Message::Assistant(_) = &history[i] {
+                    history.remove(i);
+                }
+            }
+            // 不递增 i，继续检查当前位置
+        } else {
+            i += 1;
+        }
+    }
+}
+
 /// 转换工具定义
 fn convert_tools(tools: &Option<Vec<super::types::Tool>>) -> Vec<Tool> {
     let Some(tools) = tools else {
@@ -746,7 +846,12 @@ fn merge_user_messages(
     }
 
     let content = content_parts.join("\n");
-    // 保留文本内容，即使有工具结果也不丢弃用户文本
+    // Kiro API 要求 content 不能为空，当只有 tool_results 时用占位符
+    let content = if content.is_empty() && !all_tool_results.is_empty() {
+        " ".to_string()
+    } else {
+        content
+    };
     let mut user_msg = UserMessage::new(&content, model_id);
 
     if !all_images.is_empty() {

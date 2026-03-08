@@ -516,6 +516,39 @@ impl KiroProvider {
 
             // 400 Bad Request - 请求问题，重试/切换凭据无意义
             if status.as_u16() == 400 {
+                // Log history structure for debugging
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(request_body) {
+                    if let Some(history) = parsed.pointer("/conversationState/history").and_then(|h| h.as_array()) {
+                        let summary: Vec<String> = history.iter().enumerate().map(|(i, msg)| {
+                            let role = if msg.get("userInputMessage").is_some() { "user" }
+                                else if msg.get("assistantResponseMessage").is_some() { "assistant" }
+                                else { "unknown" };
+                            let content_len = msg.pointer("/userInputMessage/content")
+                                .or_else(|| msg.pointer("/assistantResponseMessage/content"))
+                                .and_then(|c| c.as_str())
+                                .map(|s| s.len())
+                                .unwrap_or(0);
+                            let tool_count = msg.pointer("/userInputMessage/userInputMessageContext/toolResults")
+                                .or_else(|| msg.pointer("/assistantResponseMessage/toolUses"))
+                                .and_then(|t| t.as_array())
+                                .map(|a| a.len())
+                                .unwrap_or(0);
+                            format!("[{}]{}(content={}b,tools={})", i, role, content_len, tool_count)
+                        }).collect();
+                        tracing::error!("400 history structure: {}", summary.join(" "));
+                    }
+                    // Log current message content length
+                    if let Some(content) = parsed.pointer("/conversationState/currentMessage/userInputMessage/content").and_then(|c| c.as_str()) {
+                        let tr_count = parsed.pointer("/conversationState/currentMessage/userInputMessage/userInputMessageContext/toolResults")
+                            .and_then(|t| t.as_array()).map(|a| a.len()).unwrap_or(0);
+                        tracing::error!("400 currentMessage: content_len={}, tool_results={}", content.len(), tr_count);
+                    }
+                }
+                tracing::error!(
+                    "400 Bad Request - response: {} | body_size: {} bytes",
+                    body,
+                    request_body.len()
+                );
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
 

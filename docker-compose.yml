@@ -1,6 +1,7 @@
 services:
   kiro-rs:
-    image: ghcr.io/onkey4us/kiro.rs:latest
+    build: .
+    image: huydepzai121/kirors:latest
     container_name: kiro-rs
     extra_hosts:
       - "host.docker.internal:host-gateway"

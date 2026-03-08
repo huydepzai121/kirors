@@ -24,8 +24,156 @@ use uuid::Uuid;
 use super::converter::{ConversionError, convert_request};
 use super::middleware::AppState;
 use super::stream::{BufferedStreamContext, SseEvent, StreamContext};
-use super::types::{CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse, OutputConfig, Thinking};
+use super::types::{CountTokensRequest, CountTokensResponse, ErrorResponse, Message, MessagesRequest, Model, ModelsResponse, OutputConfig, Thinking};
 use super::websearch;
+
+/// Maximum number of trim-retry cycles when context window is full
+const MAX_CONTEXT_TRIM_RETRIES: usize = 3;
+
+/// Check if an error indicates the context window is full
+fn is_context_window_full(err: &Error) -> bool {
+    err.to_string().contains("CONTENT_LENGTH_EXCEEDS_THRESHOLD")
+}
+
+/// Remove the 2 oldest non-system messages from the message list,
+/// preserving system-role messages and the last message (current user input).
+///
+/// Returns the number of messages removed (0 if not enough messages to trim).
+fn trim_oldest_messages(messages: &mut Vec<Message>) -> usize {
+    // Need at least 3 messages to trim (keep at least the last one)
+    if messages.len() < 3 {
+        return 0;
+    }
+
+    // Skip any leading system-role messages
+    let start_idx = messages
+        .iter()
+        .position(|m| m.role != "system")
+        .unwrap_or(messages.len());
+
+    // Calculate how many non-system, non-last messages we can remove
+    let max_removable = messages.len() - start_idx - 1; // preserve last message
+
+    // Always remove a full pair (2) to make meaningful progress;
+    // if we can't remove at least 2, don't bother trimming
+    if max_removable < 2 {
+        return 0;
+    }
+
+    messages.drain(start_idx..start_idx + 2);
+    2
+}
+
+/// Try to call the API, automatically trimming conversation history on context window overflow.
+///
+/// On `CONTENT_LENGTH_EXCEEDS_THRESHOLD` error, trims the oldest messages and retries
+/// up to `MAX_CONTEXT_TRIM_RETRIES` times.
+///
+/// Returns `Ok((response, request_body, input_tokens))` on success,
+/// or `Err(Response)` with the appropriate HTTP error.
+async fn try_call_with_context_trim(
+    provider: &std::sync::Arc<crate::kiro::provider::KiroProvider>,
+    payload: &mut MessagesRequest,
+    profile_arn: &Option<String>,
+    is_stream: bool,
+) -> Result<(reqwest::Response, String, i32), Response> {
+    let mut total_trimmed: usize = 0;
+    for attempt in 0..=MAX_CONTEXT_TRIM_RETRIES {
+        // Convert request
+        let conversion_result = match convert_request(payload) {
+            Ok(result) => result,
+            Err(e) => {
+                let (error_type, message) = match &e {
+                    ConversionError::UnsupportedModel(model) => {
+                        ("invalid_request_error", format!("模型不支持: {}", model))
+                    }
+                    ConversionError::EmptyMessages => {
+                        ("invalid_request_error", "消息列表为空".to_string())
+                    }
+                };
+                tracing::warn!("请求转换失败: {}", e);
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::new(error_type, message)),
+                )
+                    .into_response());
+            }
+        };
+
+        // Build Kiro request
+        let kiro_request = KiroRequest {
+            conversation_state: conversion_result.conversation_state,
+            profile_arn: profile_arn.clone(),
+        };
+
+        let request_body = match serde_json::to_string(&kiro_request) {
+            Ok(body) => body,
+            Err(e) => {
+                tracing::error!("序列化请求失败: {}", e);
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new(
+                        "internal_error",
+                        format!("序列化请求失败: {}", e),
+                    )),
+                )
+                    .into_response());
+            }
+        };
+
+        // Estimate input tokens
+        let input_tokens = token::count_all_tokens(
+            payload.model.clone(),
+            payload.system.clone(),
+            payload.messages.clone(),
+            payload.tools.clone(),
+        ) as i32;
+
+        // Call API
+        let api_result = if is_stream {
+            provider.call_api_stream(&request_body).await
+        } else {
+            provider.call_api(&request_body).await
+        };
+
+        match api_result {
+            Ok(response) => {
+                if attempt > 0 {
+                    tracing::info!(
+                        total_retries = attempt,
+                        total_messages_trimmed = total_trimmed,
+                        remaining_messages = payload.messages.len(),
+                        "Context window trim-retry succeeded"
+                    );
+                }
+                return Ok((response, request_body, input_tokens));
+            }
+            Err(e) => {
+                if is_context_window_full(&e) && attempt < MAX_CONTEXT_TRIM_RETRIES {
+                    let removed = trim_oldest_messages(&mut payload.messages);
+                    if removed == 0 {
+                        tracing::warn!("Context window full but too few messages to trim, giving up");
+                        return Err(map_provider_error(e));
+                    }
+                    total_trimmed += removed;
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_retries = MAX_CONTEXT_TRIM_RETRIES,
+                        messages_removed = removed,
+                        total_trimmed = total_trimmed,
+                        remaining_messages = payload.messages.len(),
+                        "Context window full, trimming oldest messages and retrying"
+                    );
+                    continue;
+                }
+                return Err(map_provider_error(e));
+            }
+        }
+    }
+
+    // Should not reach here, but just in case
+    unreachable!("try_call_with_context_trim loop should always return")
+}
 
 /// 将 KiroProvider 错误映射为 HTTP 响应
 fn map_provider_error(err: Error) -> Response {
@@ -220,57 +368,13 @@ pub async fn post_messages(
         return websearch::handle_websearch_request(provider, &payload, input_tokens).await;
     }
 
-    // 转换请求
-    let conversion_result = match convert_request(&payload) {
-        Ok(result) => result,
-        Err(e) => {
-            let (error_type, message) = match &e {
-                ConversionError::UnsupportedModel(model) => {
-                    ("invalid_request_error", format!("模型不支持: {}", model))
-                }
-                ConversionError::EmptyMessages => {
-                    ("invalid_request_error", "消息列表为空".to_string())
-                }
-            };
-            tracing::warn!("请求转换失败: {}", e);
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(error_type, message)),
-            )
-                .into_response();
-        }
-    };
-
-    // 构建 Kiro 请求
-    let kiro_request = KiroRequest {
-        conversation_state: conversion_result.conversation_state,
-        profile_arn: state.profile_arn.clone(),
-    };
-
-    let request_body = match serde_json::to_string(&kiro_request) {
-        Ok(body) => body,
-        Err(e) => {
-            tracing::error!("序列化请求失败: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(
-                    "internal_error",
-                    format!("序列化请求失败: {}", e),
-                )),
-            )
-                .into_response();
-        }
-    };
-
-    tracing::debug!("Kiro request body: {}", request_body);
-
-    // 估算输入 tokens
-    let input_tokens = token::count_all_tokens(
-        payload.model.clone(),
-        payload.system,
-        payload.messages,
-        payload.tools,
-    ) as i32;
+    // 转换请求 + 调用 API（支持上下文窗口满时自动裁剪重试）
+    let is_stream = payload.stream;
+    let (response, _request_body, input_tokens) =
+        match try_call_with_context_trim(&provider, &mut payload, &state.profile_arn, is_stream).await {
+            Ok(result) => result,
+            Err(err_response) => return err_response,
+        };
 
     // 检查是否启用了thinking
     let thinking_enabled = payload
@@ -279,11 +383,10 @@ pub async fn post_messages(
         .map(|t| t.is_enabled())
         .unwrap_or(false);
 
-    if payload.stream {
+    if is_stream {
         // 流式响应
         handle_stream_request(
-            provider,
-            &request_body,
+            response,
             &payload.model,
             input_tokens,
             thinking_enabled,
@@ -291,24 +394,17 @@ pub async fn post_messages(
         .await
     } else {
         // 非流式响应
-        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens).await
+        handle_non_stream_request(response, &payload.model, input_tokens).await
     }
 }
 
 /// 处理流式请求
 async fn handle_stream_request(
-    provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
-    request_body: &str,
+    response: reqwest::Response,
     model: &str,
     input_tokens: i32,
     thinking_enabled: bool,
 ) -> Response {
-    // 调用 Kiro API（支持多凭据故障转移）
-    let response = match provider.call_api_stream(request_body).await {
-        Ok(resp) => resp,
-        Err(e) => return map_provider_error(e),
-    };
-
     // 创建流处理上下文
     let mut ctx = StreamContext::new_with_thinking(model, input_tokens, thinking_enabled);
 
@@ -433,17 +529,10 @@ const CONTEXT_WINDOW_SIZE: i32 = 200_000;
 
 /// 处理非流式请求
 async fn handle_non_stream_request(
-    provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
-    request_body: &str,
+    response: reqwest::Response,
     model: &str,
     input_tokens: i32,
 ) -> Response {
-    // 调用 Kiro API（支持多凭据故障转移）
-    let response = match provider.call_api(request_body).await {
-        Ok(resp) => resp,
-        Err(e) => return map_provider_error(e),
-    };
-
     // 读取响应体
     let body_bytes = match response.bytes().await {
         Ok(bytes) => bytes,
@@ -704,57 +793,13 @@ pub async fn post_messages_cc(
         return websearch::handle_websearch_request(provider, &payload, input_tokens).await;
     }
 
-    // 转换请求
-    let conversion_result = match convert_request(&payload) {
-        Ok(result) => result,
-        Err(e) => {
-            let (error_type, message) = match &e {
-                ConversionError::UnsupportedModel(model) => {
-                    ("invalid_request_error", format!("模型不支持: {}", model))
-                }
-                ConversionError::EmptyMessages => {
-                    ("invalid_request_error", "消息列表为空".to_string())
-                }
-            };
-            tracing::warn!("请求转换失败: {}", e);
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(error_type, message)),
-            )
-                .into_response();
-        }
-    };
-
-    // 构建 Kiro 请求
-    let kiro_request = KiroRequest {
-        conversation_state: conversion_result.conversation_state,
-        profile_arn: state.profile_arn.clone(),
-    };
-
-    let request_body = match serde_json::to_string(&kiro_request) {
-        Ok(body) => body,
-        Err(e) => {
-            tracing::error!("序列化请求失败: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(
-                    "internal_error",
-                    format!("序列化请求失败: {}", e),
-                )),
-            )
-                .into_response();
-        }
-    };
-
-    tracing::debug!("Kiro request body: {}", request_body);
-
-    // 估算输入 tokens
-    let input_tokens = token::count_all_tokens(
-        payload.model.clone(),
-        payload.system,
-        payload.messages,
-        payload.tools,
-    ) as i32;
+    // 转换请求 + 调用 API（支持上下文窗口满时自动裁剪重试）
+    let is_stream = payload.stream;
+    let (response, _request_body, input_tokens) =
+        match try_call_with_context_trim(&provider, &mut payload, &state.profile_arn, is_stream).await {
+            Ok(result) => result,
+            Err(err_response) => return err_response,
+        };
 
     // 检查是否启用了thinking
     let thinking_enabled = payload
@@ -763,11 +808,10 @@ pub async fn post_messages_cc(
         .map(|t| t.is_enabled())
         .unwrap_or(false);
 
-    if payload.stream {
+    if is_stream {
         // 流式响应（缓冲模式）
         handle_stream_request_buffered(
-            provider,
-            &request_body,
+            response,
             &payload.model,
             input_tokens,
             thinking_enabled,
@@ -775,7 +819,7 @@ pub async fn post_messages_cc(
         .await
     } else {
         // 非流式响应（复用现有逻辑，已经使用正确的 input_tokens）
-        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens).await
+        handle_non_stream_request(response, &payload.model, input_tokens).await
     }
 }
 
@@ -784,18 +828,11 @@ pub async fn post_messages_cc(
 /// 与 `handle_stream_request` 不同，此函数会缓冲所有事件直到流结束，
 /// 然后用从 contextUsageEvent 计算的正确 input_tokens 生成 message_start 事件。
 async fn handle_stream_request_buffered(
-    provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
-    request_body: &str,
+    response: reqwest::Response,
     model: &str,
     estimated_input_tokens: i32,
     thinking_enabled: bool,
 ) -> Response {
-    // 调用 Kiro API（支持多凭据故障转移）
-    let response = match provider.call_api_stream(request_body).await {
-        Ok(resp) => resp,
-        Err(e) => return map_provider_error(e),
-    };
-
     // 创建缓冲流处理上下文
     let ctx = BufferedStreamContext::new(model, estimated_input_tokens, thinking_enabled);
 

@@ -242,6 +242,9 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
     // 9. 从历史中移除孤立的 tool_use（Kiro API 要求 tool_use 必须有对应的 tool_result）
     remove_orphaned_tool_uses(&mut history, &orphaned_tool_use_ids);
 
+    // 9.5. 从历史 user 消息中移除孤立的 tool_result（trim 后可能出现）
+    remove_orphaned_history_tool_results(&mut history);
+
     // 10. 收集历史中使用的工具名称，为缺失的工具生成占位符定义
     // Kiro API 要求：历史消息中引用的工具必须在 tools 列表中有定义
     // 注意：Kiro 匹配工具名称时忽略大小写，所以这里也需要忽略大小写比较
@@ -499,6 +502,55 @@ fn remove_orphaned_tool_uses(
                         original_len - tool_uses.len()
                     );
                 }
+            }
+        }
+    }
+}
+
+/// 从历史用户消息中移除孤立的 tool_result
+///
+/// 当 trim_oldest_messages 移除了包含 tool_use 的 assistant 消息后，
+/// 后续 user 消息中的 tool_result 可能引用已不存在的 tool_use_id。
+/// Kiro API 要求每个 tool_result 必须有对应的 tool_use，否则返回 400。
+fn remove_orphaned_history_tool_results(history: &mut [Message]) {
+    use std::collections::HashSet;
+
+    // 收集所有历史 assistant 消息中的 tool_use_id
+    let all_tool_use_ids: HashSet<String> = history
+        .iter()
+        .filter_map(|msg| {
+            if let Message::Assistant(a) = msg {
+                a.assistant_response_message.tool_uses.as_ref()
+            } else {
+                None
+            }
+        })
+        .flat_map(|tool_uses| tool_uses.iter().map(|tu| tu.tool_use_id.clone()))
+        .collect();
+
+    // 从历史 user 消息中移除引用不存在 tool_use_id 的 tool_result
+    for msg in history.iter_mut() {
+        if let Message::User(user_msg) = msg {
+            let results = &mut user_msg.user_input_message.user_input_message_context.tool_results;
+            if results.is_empty() {
+                continue;
+            }
+            let original_len = results.len();
+            results.retain(|tr| {
+                let keep = all_tool_use_ids.contains(&tr.tool_use_id);
+                if !keep {
+                    tracing::warn!(
+                        "移除历史中孤立的 tool_result：找不到对应的 tool_use，tool_use_id={}",
+                        tr.tool_use_id
+                    );
+                }
+                keep
+            });
+            if results.len() != original_len {
+                tracing::debug!(
+                    "从历史 user 消息中移除了 {} 个孤立的 tool_result",
+                    original_len - results.len()
+                );
             }
         }
     }
@@ -1526,5 +1578,112 @@ mod tests {
             }
         }
         assert!(found_tool_use, "合并后的 assistant 消息应包含 tool_use");
+    }
+
+    /// Helper: build a HistoryAssistantMessage with tool_uses
+    fn assistant_with_tool_uses(content: &str, tool_use_ids: &[&str]) -> Message {
+        let tool_uses: Vec<ToolUseEntry> = tool_use_ids
+            .iter()
+            .map(|id| ToolUseEntry::new(*id, "some_tool"))
+            .collect();
+        Message::Assistant(HistoryAssistantMessage {
+            assistant_response_message: AssistantMessage::new(content)
+                .with_tool_uses(tool_uses),
+        })
+    }
+
+    /// Helper: build a HistoryUserMessage with tool_results
+    fn user_with_tool_results(content: &str, model_id: &str, tool_use_ids: &[&str]) -> Message {
+        let tool_results: Vec<ToolResult> = tool_use_ids
+            .iter()
+            .map(|id| ToolResult::success(*id, "result"))
+            .collect();
+        let mut user_msg = UserMessage::new(content, model_id);
+        let ctx = UserInputMessageContext::new().with_tool_results(tool_results);
+        user_msg.user_input_message_context = ctx;
+        Message::User(HistoryUserMessage { user_input_message: user_msg })
+    }
+
+    #[test]
+    fn test_remove_orphaned_history_tool_results_cleans_orphans() {
+        // assistant with tool_use(abc) was trimmed, user still has tool_result(abc)
+        let mut history = vec![
+            user_with_tool_results("result for abc", "claude-sonnet-4.5", &["abc"]),
+            assistant_with_tool_uses("done", &[]),
+        ];
+        // Remove the empty tool_uses (simulating no tool_uses left after trim)
+        if let Message::Assistant(ref mut a) = history[1] {
+            a.assistant_response_message.tool_uses = None;
+        }
+
+        remove_orphaned_history_tool_results(&mut history);
+
+        if let Message::User(ref u) = history[0] {
+            assert!(
+                u.user_input_message.user_input_message_context.tool_results.is_empty(),
+                "orphaned tool_result(abc) should be removed"
+            );
+        } else {
+            panic!("expected user message");
+        }
+    }
+
+    #[test]
+    fn test_remove_orphaned_history_tool_results_preserves_valid() {
+        let mut history = vec![
+            assistant_with_tool_uses("calling tool", &["xyz"]),
+            user_with_tool_results("tool output", "claude-sonnet-4.5", &["xyz"]),
+        ];
+
+        remove_orphaned_history_tool_results(&mut history);
+
+        if let Message::User(ref u) = history[1] {
+            assert_eq!(
+                u.user_input_message.user_input_message_context.tool_results.len(),
+                1,
+                "valid tool_result(xyz) should be preserved"
+            );
+        } else {
+            panic!("expected user message");
+        }
+    }
+
+    #[test]
+    fn test_remove_orphaned_history_tool_results_mixed() {
+        // assistant has tool_use(valid) but not tool_use(orphan)
+        let mut history = vec![
+            assistant_with_tool_uses("calling", &["valid"]),
+            user_with_tool_results("results", "claude-sonnet-4.5", &["valid", "orphan"]),
+        ];
+
+        remove_orphaned_history_tool_results(&mut history);
+
+        if let Message::User(ref u) = history[1] {
+            let results = &u.user_input_message.user_input_message_context.tool_results;
+            assert_eq!(results.len(), 1, "should keep only valid tool_result");
+            assert_eq!(results[0].tool_use_id, "valid");
+        } else {
+            panic!("expected user message");
+        }
+    }
+
+    #[test]
+    fn test_remove_orphaned_history_tool_results_multiple_orphans() {
+        // No assistant tool_uses at all — both tool_results are orphaned
+        let mut history = vec![
+            Message::Assistant(HistoryAssistantMessage::new("no tools")),
+            user_with_tool_results("results", "claude-sonnet-4.5", &["a", "b"]),
+        ];
+
+        remove_orphaned_history_tool_results(&mut history);
+
+        if let Message::User(ref u) = history[1] {
+            assert!(
+                u.user_input_message.user_input_message_context.tool_results.is_empty(),
+                "both orphaned tool_results should be removed"
+            );
+        } else {
+            panic!("expected user message");
+        }
     }
 }
